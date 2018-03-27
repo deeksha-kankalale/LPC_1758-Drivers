@@ -1,0 +1,199 @@
+#include "LPC17xx.h"
+#include <stdio.h>
+#include"utilities.h"
+
+
+//Function headers
+void flashSpiInit();
+char spiGiveAndTake(char send);
+void read512BytesFlashMemory();
+void readManufacAndDeviceID();
+void readFlashStatusReg();
+
+
+//initialize SSP1
+void flashSpiInit()
+{
+    const uint32_t flashChipSelect = 1 << 6;
+    const uint32_t spi1TurnOn = 1 << 10;
+
+    //chip select for the flash mem. active low
+    LPC_GPIO0->FIODIR |= flashChipSelect;
+    LPC_GPIO0->FIOSET = flashChipSelect;
+
+    //power on-board spi1 interface (should be on after reset anyway)
+    LPC_SC->PCONP |= spi1TurnOn;
+
+    //configure spi clock
+    LPC_SC->PCLKSEL0 &= ~(3 << 20); //clear SPI 1 clock control bits
+    LPC_SC->PCLKSEL0 |= 1 << 20; // clk/1
+
+    //change pin0.7 from gpio to spi clock1
+    LPC_PINCON->PINSEL0 &= ~(3 << 14); //clear P0.7 control bits
+    LPC_PINCON->PINSEL0 |= 2 << 14; //set P0.7 to SCK1
+
+    //change pin0.8 from gpio to miso1
+    LPC_PINCON->PINSEL0 &= ~(3 << 16); //clear p0.8 control bits
+    LPC_PINCON->PINSEL0 |= 2 << 16; //set p0.8 to miso1
+
+    //change pin0.9 from gpio to mosi1
+    LPC_PINCON->PINSEL0 &= ~(3 << 18); //clear p0.9 control bits
+    LPC_PINCON->PINSEL0 |= 2 << 18; // set p0.9 to mosi1
+
+    //configure spi1 control register 0
+    LPC_SSP1->CR0 = 7; //configure data size select (DSS) to 8 bits. disregard other options inside the register for now
+
+    //configure spi1 control register 1
+    LPC_SSP1->CR1 |= 0b0010; // enable SSP
+
+    //configure spi1 clock prescaler
+    LPC_SSP1->CPSR = 8; //since preet divided it by 8, will tweak later
+}
+
+//get a byte and receive a byte from spi
+char spiGiveAndTake(char send)
+{
+    LPC_SSP1->DR = send;
+    while(LPC_SSP1->SR & (1 << 4))
+    {
+        //wait till spi is done sending/receiving data
+    }
+    return LPC_SSP1->DR;
+}
+
+//read the flash manufacturer id and device id
+void readManufacAndDeviceID()
+{
+    const char manuRead = 0x9F;
+    const uint32_t flashChipSelect = 1 << 6;
+    const char randByte = 0x69;
+    char spiOut;
+
+    //Select the Flash Memory (CS active low)
+    LPC_GPIO0->FIOCLR = flashChipSelect;
+
+    //Send Manufacturer and Device ID Read command
+    spiOut = spiGiveAndTake(manuRead);
+
+    //Send a byte to get a byte
+    spiOut = spiGiveAndTake(randByte);
+    printf("Manufacturer ID: 0x%X\n\r",spiOut);
+    spiOut = spiGiveAndTake(randByte);
+    printf("Family Code/Density Code: 0x%X\n\r",spiOut);
+    spiOut = spiGiveAndTake(randByte);
+    printf("MLC Code/Product Version: 0x%X\n\r",spiOut);
+    spiOut = spiGiveAndTake(randByte);
+    printf("Byte Count: 0x%X\n\n\r",spiOut);
+
+    //Deselect the Flash Memory (CS active low)
+    LPC_GPIO0->FIOSET = flashChipSelect;
+}
+
+//read the spi flash mem status register
+void readFlashStatusReg()
+{
+    const uint32_t flashChipSelect = 1 << 6;
+    const char randByte = 0x69;
+    char spiOut;
+    const char statusRead = 0xD7;
+
+    //Select the Flash Memory (CS active low)
+    LPC_GPIO0->FIOCLR = flashChipSelect;
+
+    //Send Manufacturer and Device ID Read command
+    spiOut = spiGiveAndTake(statusRead);
+
+    //send a byte to get a byte
+    spiOut = spiGiveAndTake(randByte);
+    printf("Flash Status Register: 0x%X\n\r",spiOut);
+    printf("Page Size (Bit 0): %u\n\r", spiOut & 1);
+    printf("Sector Protection (Bit 1): %u\n\r", (spiOut >> 1) & 1);
+    printf("Device Density (Bits 2,3,4,5): 0x%X\n\r", (spiOut >> 2) & 0b1111);
+    printf("Main Memory Page to Buffer Compare (Bit 6): %u\n\r", (spiOut >> 6) & 1);
+    printf("Busy/Read (Bit 7): %u\n\r", (spiOut >> 7) & 1);
+
+    //Deselect the Flash Memory (CS active low)
+    LPC_GPIO0->FIOSET = flashChipSelect;
+}
+
+//reading the MBR(Sector 0) of the spi flash mem
+void read512BytesFlashMemory()
+{
+    const uint32_t flashChipSelect = 1 << 6;
+    const char randByte = 0x69;
+    char spiOut;
+    const char memReadCmd = 0xD2;
+    const char highAddressPage = 0x00;
+    const char firstPage = 0x00;
+    const char secondPage = 0x01;
+    const char addressByteStart = 0x00;
+
+    //Select the Flash Memory (CS active low)
+    LPC_GPIO0->FIOCLR = flashChipSelect;
+
+    //Send Command to read first page of the flash mem.
+    spiOut = spiGiveAndTake(memReadCmd); //send read page memory command
+    spiOut = spiGiveAndTake(highAddressPage); //sending higher bits of the address to read, 0x00 in this case
+    spiOut = spiGiveAndTake(firstPage); //sending lower bits of the address to read, second page = 0x01
+    spiOut = spiGiveAndTake(addressByteStart); //sending byte within the page to start read, since i wanna start from the beginning, i send 0x00
+
+    //protocol requires 4 bytes of don't cares. seems like its a way of delay for the flash mem to get ready.
+    spiOut = spiGiveAndTake(randByte); //first don't care
+    spiOut = spiGiveAndTake(randByte); //second don't care
+    spiOut = spiGiveAndTake(randByte); // third don't care
+    spiOut = spiGiveAndTake(randByte); //fourth don't care
+
+    uint16_t count = 0;
+    for(int i = 0; i < 16; i++)
+    {
+        printf("%03X   ",count); //formatting base address
+        for(int j = 0; j < 16; j++)
+        {
+            spiOut = spiGiveAndTake(randByte);
+            printf("%02X ",spiOut); //print byte within the address
+            count++;
+        }
+        printf("\n\r");
+    }
+
+    //toggle chip select to read next 256 bytes from flash
+    LPC_GPIO0->FIOSET = flashChipSelect;
+    delay_ms(1); //just in case its too fast of a toggle
+    LPC_GPIO0->FIOCLR = flashChipSelect;
+
+    //same sequence as above, but this part is for reading the second page of the flash mem
+    spiOut = spiGiveAndTake(memReadCmd);
+    spiOut = spiGiveAndTake(highAddressPage);
+    spiOut = spiGiveAndTake(secondPage);
+    spiOut = spiGiveAndTake(addressByteStart);
+
+    spiOut = spiGiveAndTake(randByte); //first don't care
+    spiOut = spiGiveAndTake(randByte); //second don't care
+    spiOut = spiGiveAndTake(randByte); // third don't care
+    spiOut = spiGiveAndTake(randByte); //fourth don't care
+
+    //same concept as the previous for loop, except this is for the 2nd page of flash mem
+    for(int i = 0; i < 16; i++)
+    {
+        printf("%03X   ",count);
+        for(int j = 0; j < 16; j++)
+        {
+            spiOut = spiGiveAndTake(randByte);
+            printf("%02X ",spiOut);
+            count++;
+        }
+        printf("\n\r");
+    }
+
+    //Deselect the Flash Memory (CS active low)
+    LPC_GPIO0->FIOSET = flashChipSelect;
+}
+
+
+
+int main()
+{
+    flashSpiInit();
+    read512BytesFlashMemory();
+
+}
